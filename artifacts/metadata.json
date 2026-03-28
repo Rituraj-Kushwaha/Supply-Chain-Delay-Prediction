@@ -1,0 +1,14 @@
+{
+  "distance_proxy_note": "Distance is computed as a nearest-seller proxy because the provided four-file subset does not contain an order-level seller_id join.",
+  "rows_modeled": 96470,
+  "train_rows": 61740,
+  "validation_rows": 15436,
+  "test_rows": 19294,
+  "best_model": "XGBoost | With Distance",
+  "best_model_f1": 0.33843978317228374,
+  "best_threshold": 0.66,
+  "target_definition": {
+    "delay_days": "order_delivered_customer_date - order_purchase_timestamp",
+    "is_delayed": "order_delivered_customer_date > order_estimated_delivery_date"
+  }
+}

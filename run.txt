@@ -1,0 +1,17 @@
+Supply Chain Delay Prediction - Run Commands
+
+Open PowerShell in:
+c:\Users\kritu\Desktop\DS HOTS
+
+1. Install dependencies
+python -m pip install -r requirements.txt
+
+2. Train the data pipeline and models
+python model_training.py
+
+3. Launch the Streamlit dashboard
+python -m streamlit run app.py
+
+Optional:
+If artifacts are already generated in the artifacts folder, you can skip step 2 and run only:
+python -m streamlit run app.py

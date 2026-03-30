@@ -167,9 +167,6 @@ python -m streamlit run app.py
 ### Delay Distribution
 ![Delay Distribution](<artifacts/figures/delay_distribution.png>)
 
-### Distance Vs Delay
-![Distance Vs Delay](<artifacts/figures/distance_vs_delay.png>)
-
 ### Delay By Day Of Week
 ![Delay By Day Of Week](<artifacts/figures/delay_by_day_of_week.png>)
 

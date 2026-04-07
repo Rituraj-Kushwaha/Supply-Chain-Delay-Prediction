@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -10,14 +12,16 @@ import streamlit as st
 
 from data_processing import aggregate_geolocations, build_state_geo_reference, load_raw_datasets
 from feature_engineering import DAY_ORDER, MONTH_ORDER
-from model_training import ARTIFACTS_DIR, run_training_pipeline
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 PROCESSED_DATA_PATH = ARTIFACTS_DIR / "processed_delay_dataset.csv"
 RESULTS_PATH = ARTIFACTS_DIR / "model_comparison.csv"
 IMPORTANCE_PATH = ARTIFACTS_DIR / "xgboost_feature_importance.csv"
 MODEL_BUNDLE_PATH = ARTIFACTS_DIR / "best_model_bundle.joblib"
 METADATA_PATH = ARTIFACTS_DIR / "metadata.json"
+APP_SUPPORT_PATH = ARTIFACTS_DIR / "app_support_bundle.joblib"
 DISTANCE_BAND_ORDER = ["0-50", "50-150", "150-300", "300-600", "600-1000", "1000+"]
 AUTO_SELECT_LABEL = "Auto infer from selection"
 
@@ -39,8 +43,19 @@ def load_model_bundle() -> dict:
     return joblib.load(MODEL_BUNDLE_PATH)
 
 
+@st.cache_resource(show_spinner=False)
+def load_app_support_bundle() -> dict:
+    if APP_SUPPORT_PATH.exists():
+        return joblib.load(APP_SUPPORT_PATH)
+    return {}
+
+
 @st.cache_data(show_spinner=False)
 def load_cleaning_summary(processed_row_count: int, delayed_rate_pct: float) -> pd.DataFrame:
+    support_bundle = load_app_support_bundle()
+    if support_bundle.get("cleaning_summary_rows"):
+        return pd.DataFrame(support_bundle["cleaning_summary_rows"])
+
     raw = load_raw_datasets()
     orders = raw["orders"]
     customers = raw["customers"]
@@ -125,6 +140,14 @@ def load_cleaning_summary(processed_row_count: int, delayed_rate_pct: float) -> 
 
 @st.cache_data(show_spinner=False)
 def load_location_references() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    support_bundle = load_app_support_bundle()
+    if support_bundle:
+        geo_by_zip = support_bundle.get("geo_by_zip")
+        city_state_reference = support_bundle.get("city_state_reference")
+        state_reference = support_bundle.get("state_reference")
+        if geo_by_zip is not None and city_state_reference is not None and state_reference is not None:
+            return geo_by_zip, city_state_reference, state_reference
+
     raw = load_raw_datasets()
     geolocation = raw["geolocation"].copy()
     geolocation["geolocation_city"] = (
@@ -153,6 +176,10 @@ def load_location_references() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame
 
 @st.cache_data(show_spinner=False)
 def load_prediction_form_options() -> dict:
+    support_bundle = load_app_support_bundle()
+    if support_bundle.get("form_options"):
+        return support_bundle["form_options"]
+
     raw = load_raw_datasets()
     customers = raw["customers"].copy()
     sellers = raw["sellers"].copy()
@@ -998,6 +1025,8 @@ def main() -> None:
         )
         if st.button("Run full pipeline"):
             with st.spinner("Training models and generating artifacts..."):
+                from model_training import run_training_pipeline
+
                 run_training_pipeline()
                 st.cache_data.clear()
                 st.cache_resource.clear()

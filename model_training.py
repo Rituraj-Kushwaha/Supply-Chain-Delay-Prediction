@@ -16,7 +16,14 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xgboost import XGBClassifier
 
-from data_processing import DISTANCE_PROXY_NOTE, RAW_DATA_DIR, build_model_base_table
+from data_processing import (
+    DISTANCE_PROXY_NOTE,
+    RAW_DATA_DIR,
+    aggregate_geolocations,
+    build_model_base_table,
+    build_state_geo_reference,
+    load_raw_datasets,
+)
 from evaluation import (
     compute_classification_metrics,
     ensure_output_dir,
@@ -34,6 +41,7 @@ from feature_engineering import create_features, get_feature_sets
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
+APP_SUPPORT_BUNDLE_PATH = ARTIFACTS_DIR / "app_support_bundle.joblib"
 RANDOM_STATE = 42
 
 
@@ -138,6 +146,167 @@ def select_best_threshold(y_true: pd.Series, y_score: pd.Series) -> float:
             best_f1 = score
             best_threshold = threshold
     return best_threshold
+
+
+def build_app_support_bundle(
+    data_dir: Path | str = RAW_DATA_DIR,
+    artifacts_dir: Path | str = ARTIFACTS_DIR,
+    processed_row_count: int | None = None,
+    delayed_rate_pct: float | None = None,
+) -> dict:
+    artifacts_path = ensure_output_dir(artifacts_dir)
+    raw = load_raw_datasets(data_dir)
+    orders = raw["orders"]
+    customers = raw["customers"].copy()
+    sellers = raw["sellers"].copy()
+    geolocation = raw["geolocation"].copy()
+
+    geolocation["geolocation_city"] = (
+        geolocation["geolocation_city"].astype(str).str.strip().str.lower()
+    )
+    geo_by_zip = aggregate_geolocations(geolocation)
+    city_state_reference = (
+        geolocation.groupby(["geolocation_state", "geolocation_city"], as_index=False)
+        .agg(
+            city_lat=("geolocation_lat", "mean"),
+            city_lng=("geolocation_lng", "mean"),
+        )
+        .rename(
+            columns={
+                "geolocation_state": "state",
+                "geolocation_city": "city",
+            }
+        )
+    )
+    state_reference = build_state_geo_reference(geolocation).rename(
+        columns={"geolocation_state": "state"}
+    )
+
+    customers["customer_state"] = customers["customer_state"].astype(str)
+    customers["customer_zip_code_prefix"] = (
+        customers["customer_zip_code_prefix"].astype("Int64").astype(str)
+    )
+
+    sellers["seller_state"] = sellers["seller_state"].astype(str)
+    sellers["seller_city"] = sellers["seller_city"].astype(str).str.strip()
+    sellers["seller_zip_code_prefix"] = sellers["seller_zip_code_prefix"].astype("Int64").astype(str)
+
+    customer_zip_by_state: dict[str, list[str]] = {}
+    for state, group in customers.groupby("customer_state"):
+        customer_zip_by_state[state] = sorted(group["customer_zip_code_prefix"].dropna().unique().tolist())
+
+    seller_city_by_state: dict[str, list[str]] = {}
+    seller_zip_by_state: dict[str, list[str]] = {}
+    seller_zip_by_state_city: dict[tuple[str, str], list[str]] = {}
+
+    for state, group in sellers.groupby("seller_state"):
+        seller_city_by_state[state] = sorted(group["seller_city"].dropna().unique().tolist())
+        seller_zip_by_state[state] = sorted(group["seller_zip_code_prefix"].dropna().unique().tolist())
+
+    for (state, city), group in sellers.groupby(["seller_state", "seller_city"]):
+        seller_zip_by_state_city[(state, city)] = sorted(
+            group["seller_zip_code_prefix"].dropna().unique().tolist()
+        )
+
+    delivered_orders = orders.loc[orders["order_status"] == "delivered"].copy()
+    usable_target_orders = delivered_orders.dropna(
+        subset=[
+            "order_purchase_timestamp",
+            "order_delivered_customer_date",
+            "order_estimated_delivery_date",
+        ]
+    )
+
+    geo_zip_count = geolocation["geolocation_zip_code_prefix"].nunique()
+    customer_geo_coverage = raw["customers"]["customer_zip_code_prefix"].isin(
+        geolocation["geolocation_zip_code_prefix"]
+    ).mean() * 100
+    seller_geo_coverage = raw["sellers"]["seller_zip_code_prefix"].isin(
+        geolocation["geolocation_zip_code_prefix"]
+    ).mean() * 100
+
+    processed_dataset_path = Path(artifacts_path) / "processed_delay_dataset.csv"
+    if (processed_row_count is None or delayed_rate_pct is None) and processed_dataset_path.exists():
+        processed_target = pd.read_csv(processed_dataset_path, usecols=["is_delayed"])
+        if processed_row_count is None:
+            processed_row_count = int(len(processed_target))
+        if delayed_rate_pct is None:
+            delayed_rate_pct = float(processed_target["is_delayed"].mean() * 100)
+
+    final_processed_row_count = processed_row_count if processed_row_count is not None else int(len(usable_target_orders))
+    final_delayed_rate_pct = delayed_rate_pct if delayed_rate_pct is not None else 0.0
+
+    cleaning_summary_rows = [
+        {
+            "Step": "Raw source intake",
+            "System action": "Loaded only the four approved Olist files: orders, customers, sellers, and geolocation.",
+            "Current result": (
+                f"Orders: {len(orders):,} | Customers: {len(customers):,} | "
+                f"Sellers: {len(sellers):,} | Geolocation rows: {len(geolocation):,}"
+            ),
+        },
+        {
+            "Step": "Order filtering",
+            "System action": "Restricted the modeling base to delivered orders so the final delivery outcome is known.",
+            "Current result": f"Delivered orders retained: {len(delivered_orders):,}",
+        },
+        {
+            "Step": "Target completeness",
+            "System action": (
+                "Dropped delivered orders missing purchase timestamp, delivered customer timestamp, "
+                "or estimated delivery timestamp."
+            ),
+            "Current result": f"Target-ready delivered orders: {len(usable_target_orders):,}",
+        },
+        {
+            "Step": "Geolocation standardization",
+            "System action": "Collapsed noisy geolocation rows into ZIP-prefix level reference coordinates.",
+            "Current result": f"Unique geolocation ZIP prefixes after aggregation: {geo_zip_count:,}",
+        },
+        {
+            "Step": "Customer coordinate coverage",
+            "System action": "Mapped customer ZIP prefixes to geolocation records and used state medians as fallback.",
+            "Current result": f"Customer ZIP coverage from geolocation table: {customer_geo_coverage:.2f}%",
+        },
+        {
+            "Step": "Seller coordinate coverage",
+            "System action": "Mapped seller ZIP prefixes to geolocation records and used state medians as fallback.",
+            "Current result": f"Seller ZIP coverage from geolocation table: {seller_geo_coverage:.2f}%",
+        },
+        {
+            "Step": "Spatial proxy feature",
+            "System action": (
+                "Created `distance_km` using a nearest-seller geographic proxy because order-level seller links "
+                "are not available in the approved file subset."
+            ),
+            "Current result": "Distance feature available for downstream analysis and modeling.",
+        },
+        {
+            "Step": "Feature quality filtering",
+            "System action": "Removed rows with invalid negative delivery durations or negative promised lead times.",
+            "Current result": f"Final model-ready rows: {final_processed_row_count:,}",
+        },
+        {
+            "Step": "Class definition audit",
+            "System action": "Defined `is_delayed = 1` when actual delivery happened after the estimated delivery date.",
+            "Current result": f"Delayed shipments in modeling table: {final_delayed_rate_pct:.2f}%",
+        },
+    ]
+
+    support_bundle = {
+        "cleaning_summary_rows": cleaning_summary_rows,
+        "geo_by_zip": geo_by_zip,
+        "city_state_reference": city_state_reference,
+        "state_reference": state_reference,
+        "form_options": {
+            "customer_zip_by_state": customer_zip_by_state,
+            "seller_city_by_state": seller_city_by_state,
+            "seller_zip_by_state": seller_zip_by_state,
+            "seller_zip_by_state_city": seller_zip_by_state_city,
+        },
+    }
+    joblib.dump(support_bundle, Path(artifacts_path) / APP_SUPPORT_BUNDLE_PATH.name)
+    return support_bundle
 
 
 def run_training_pipeline(
@@ -287,6 +456,12 @@ def run_training_pipeline(
         "results": results_frame.to_dict(orient="records"),
     }
     joblib.dump(model_bundle, artifacts_path / "best_model_bundle.joblib")
+    build_app_support_bundle(
+        data_dir=data_dir,
+        artifacts_dir=artifacts_path,
+        processed_row_count=int(len(feature_frame)),
+        delayed_rate_pct=float(feature_frame["is_delayed"].mean() * 100),
+    )
 
     return {
         "feature_frame": feature_frame,

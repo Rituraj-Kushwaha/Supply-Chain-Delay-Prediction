@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 streamlit_smoke.log
+.streamlit/secrets.toml
+.venv/

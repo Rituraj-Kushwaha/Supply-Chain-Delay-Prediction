@@ -108,6 +108,7 @@ DS HOTS/
 ├── artifacts/
 │   ├── figures/
 │   ├── best_model_bundle.joblib
+│   ├── app_support_bundle.joblib
 │   ├── metadata.json
 │   ├── model_comparison.csv
 │   ├── model_comparison.json
